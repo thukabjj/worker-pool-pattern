@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -212,16 +213,7 @@ func measureCPUUsage() float64 {
 }
 
 func measureMemoryUsage() uint64 {
-	cmd := exec.Command("sh", "-c", "ps -o rss= -p $$")
-	output, err := cmd.Output()
-	if err != nil {
-		log.Fatalf("Failed to measure memory usage: %v", err)
-	}
-	memUsageStr := strings.TrimSpace(string(output))
-	var memUsage uint64
-	_, err = fmt.Sscanf(memUsageStr, "%d", &memUsage)
-	if err != nil {
-		log.Fatalf("Failed to parse memory usage: %v", err)
-	}
-	return memUsage * 1024 // Convert from KB to bytes
+	memStart := runtime.MemStats{}
+	runtime.ReadMemStats(&memStart)
+	return memStart.Alloc
 }

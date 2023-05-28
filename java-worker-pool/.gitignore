@@ -8,7 +8,7 @@ WorkerPoolPattern
 *.jar
 
  ### IntelliJ IDEA ###
- .idea
+ .idea/*
  *.iws
  *.iml
  *.ipr
