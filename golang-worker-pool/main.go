@@ -37,7 +37,7 @@ var (
 
 func main() {
 
-	const fileName = "../data_100000.csv"
+	const fileName = "./data_100000.csv"
 
 	file, err := os.Open(fileName)
 

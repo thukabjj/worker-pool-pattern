@@ -24,7 +24,7 @@ public class WorkerPoolPattern {
     private static final ConcurrentLinkedQueue<String> errorLines = new ConcurrentLinkedQueue<>();
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        Path csvFile = Paths.get("../data_100000.csv");
+        Path csvFile = Paths.get("./data_100000.csv");
         ExecutorService executor = Executors.newFixedThreadPool(10);
 
         long cpuStart = measureCpuUsage();
@@ -54,8 +54,8 @@ public class WorkerPoolPattern {
 
         System.out.println("Execution Time: " + executionTime + " ms");
         System.out.println("CPU Usage: " + (cpuEnd - cpuStart) + " %");
-        System.out.println("Memory Usage Begin: "+  memStart + "bytes");
-        System.out.println("Memory Usage End: "+ memEnd + "bytes");
+        System.out.println("Memory Usage Begin: "+  memStart + " bytes");
+        System.out.println("Memory Usage End: "+ memEnd + " bytes");
         System.out.println("Memory Usage: " +  totalMemUsage + " bytes");
     }
 
