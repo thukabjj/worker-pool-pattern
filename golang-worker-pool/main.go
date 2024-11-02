@@ -5,215 +5,155 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
+	"net/http"
+	_ "net/http/pprof" // Import pprof for profiling
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Number of lines each worker will process
-const LinesPerWorker = 1000
+const (
+	LinesPerWorker = 1000
+	ErrorBatchSize = 100
+)
 
-// Required fields are identified by their position in the CSV line
-var requiredFields = map[int]bool{
-	0: true, // id
-	3: true, // email
-}
+var requiredFields = map[int]bool{0: true, 3: true}
 
-// ErrorLine represents a line that could not be processed
 type ErrorLine struct {
 	Line  string
 	Error error
 }
 
 var (
-	mu        sync.Mutex
 	errorFile *os.File
-	bw        *bufio.Writer
+	errorBuf  *bufio.Writer
+	errorChan = make(chan ErrorLine, 100)
 )
 
 func main() {
+	// Start pprof in a separate goroutine
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 
 	const fileName = "./data_100000.csv"
 
 	file, err := os.Open(fileName)
-
 	if err != nil {
-		log.Fatalf("cannot able to read the file: %v", err)
+		log.Fatalf("cannot open file: %v", err)
 	}
-
 	defer file.Close()
 
-	errorLines := make(chan ErrorLine)
-
-	go Process(file, errorLines)
+	go handleErrors() // Separate goroutine for handling errors
 
 	cpuStart := measureCPUUsage()
 	memStart := measureMemoryUsage()
-
 	startTime := time.Now()
 
-	for errLine := range errorLines {
-		mu.Lock()
-		if errorFile == nil {
-			var err error
-			errorFile, err = os.Create("errors.csv")
-			if err != nil {
-				log.Fatalf("Failed to create error file: %v", err)
-			}
-			bw = bufio.NewWriter(errorFile)
-		}
-		_, err := bw.WriteString(fmt.Sprintf("%s, error: %s\n", errLine.Line, errLine.Error))
-		if err != nil {
-			log.Fatalf("Failed to write to error file: %v", err)
-		}
-		mu.Unlock()
-	}
+	processFile(file)
 
-	if bw != nil {
-		if err := bw.Flush(); err != nil {
-			log.Fatalf("Failed to flush error file: %v", err)
-		}
-	}
-	if errorFile != nil {
-		if err := errorFile.Close(); err != nil {
-			log.Fatalf("Failed to close error file: %v", err)
-		}
-	}
+	close(errorChan) // Close error channel once processing is done
 
 	cpuEnd := measureCPUUsage()
 	memEnd := measureMemoryUsage()
-	totalMemUsage := (memEnd - memStart)
-
-	endTime := time.Now()
-	executionTime := endTime.Sub(startTime)
-
-	fmt.Println("Execution Time:", executionTime)
-	fmt.Println("CPU Usage:", cpuEnd-cpuStart, "%")
-	fmt.Println("Memory Usage Begin:", memStart, "bytes")
-	fmt.Println("Memory Usage End:", memEnd, "bytes")
-	fmt.Println("Memory Usage:", totalMemUsage, "bytes")
+	fmt.Printf("Execution Time: %v\nCPU Usage: %.2f%%\nMemory Usage: %d bytes\n",
+		time.Since(startTime), cpuEnd-cpuStart, memEnd-memStart)
 }
 
-func Process(f *os.File, errorLines chan<- ErrorLine) {
-
-	linesPool := sync.Pool{
-		New: func() interface{} {
-			lines := make([]byte, LinesPerWorker)
-			return lines
-		},
-	}
-
-	stringPool := sync.Pool{
-		New: func() interface{} {
-			lines := ""
-			return lines
-		},
-	}
-
-	r := bufio.NewReader(f)
-
+func processFile(file *os.File) {
+	r := bufio.NewReader(file)
 	var wg sync.WaitGroup
 
 	for {
-		buf := linesPool.Get().([]byte)
-
-		n, err := r.Read(buf)
-		buf = buf[:n]
-
-		if n == 0 {
-			if err != nil && err != io.EOF {
-				log.Printf("Error reading file: %v", err)
-			}
+		lines, err := readLines(r)
+		if len(lines) > 0 {
+			wg.Add(1)
+			go func(lines [][]byte) {
+				defer wg.Done()
+				for _, line := range lines {
+					processLine(line)
+				}
+			}(lines)
+		}
+		if err == io.EOF {
 			break
+		} else if err != nil {
+			log.Printf("Error reading file: %v", err)
 		}
-
-		nextUntillNewline, err := r.ReadBytes('\n')
-
-		if err != io.EOF {
-			buf = append(buf, nextUntillNewline...)
-		}
-
-		wg.Add(1)
-		go func() {
-			ProcessChunk(buf, &linesPool, &stringPool, errorLines)
-			wg.Done()
-		}()
-
 	}
+
 	wg.Wait()
-	close(errorLines)
 }
 
-func ProcessChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, errorLines chan<- ErrorLine) {
-
-	var wg2 sync.WaitGroup
-
-	entries := stringPool.Get().(string)
-	entries = string(chunk)
-
-	linesPool.Put(chunk)
-
-	entriesSlice := strings.Split(entries, "\n")
-
-	stringPool.Put(entries)
-
-	chunkSize := 300
-	n := len(entriesSlice)
-	noOfThread := n / chunkSize
-
-	if n%chunkSize != 0 {
-		noOfThread++
+func readLines(r *bufio.Reader) ([][]byte, error) {
+	var lines [][]byte
+	for i := 0; i < LinesPerWorker; i++ {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			lines = append(lines, append([]byte(nil), line...)) // Copy line to avoid data race
+		}
+		if err == io.EOF {
+			return lines, err
+		} else if err != nil {
+			return nil, err
+		}
 	}
+	return lines, nil
+}
 
-	for i := 0; i < noOfThread; i++ {
-		wg2.Add(1)
-		go func(start int, end int) {
-			defer wg2.Done()
-			for i := start; i < end; i++ {
-				text := entriesSlice[i]
-				if len(text) == 0 {
-					continue
-				}
-				entry := strings.Split(text, ",")
-
-				// Check for required fields
-				for fieldPos, required := range requiredFields {
-					if required && (len(entry) <= fieldPos || entry[fieldPos] == "") {
-						errorLines <- ErrorLine{
-							Line:  text,
-							Error: fmt.Errorf("missing required field at position %d", fieldPos),
-						}
-						break
-					}
-				}
-			}
-		}(i*chunkSize, int(math.Min(float64((i+1)*chunkSize), float64(len(entriesSlice)))))
+func processLine(line []byte) {
+	fields := strings.Split(string(line), ",")
+	if missingFields(fields) {
+		errorChan <- ErrorLine{
+			Line:  string(line),
+			Error: fmt.Errorf("missing required fields"),
+		}
 	}
+}
 
-	wg2.Wait()
+func missingFields(fields []string) bool {
+	for pos := range requiredFields {
+		if pos >= len(fields) || fields[pos] == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func handleErrors() {
+	errorFile, _ = os.Create("errors.csv")
+	defer errorFile.Close()
+	errorBuf = bufio.NewWriter(errorFile)
+	defer errorBuf.Flush()
+
+	buffer := make([]string, 0, ErrorBatchSize)
+	for errLine := range errorChan {
+		buffer = append(buffer, fmt.Sprintf("%s, error: %v\n", errLine.Line, errLine.Error))
+		if len(buffer) >= ErrorBatchSize {
+			flushErrors(buffer)
+			buffer = buffer[:0]
+		}
+	}
+	if len(buffer) > 0 {
+		flushErrors(buffer)
+	}
+}
+
+func flushErrors(errors []string) {
+	for _, errLine := range errors {
+		errorBuf.WriteString(errLine)
+	}
+	errorBuf.Flush()
 }
 
 func measureCPUUsage() float64 {
-	cmd := exec.Command("sh", "-c", "ps -o %cpu= -p $$")
-	output, err := cmd.Output()
-	if err != nil {
-		log.Fatalf("Failed to measure CPU usage: %v", err)
-	}
-	cpuUsageStr := strings.TrimSpace(string(output))
-	var cpuUsage float64
-	_, err = fmt.Sscanf(cpuUsageStr, "%f", &cpuUsage)
-	if err != nil {
-		log.Fatalf("Failed to parse CPU usage: %v", err)
-	}
-	return cpuUsage
+	return 0.0 // Placeholder for CPU measurement
 }
 
 func measureMemoryUsage() uint64 {
-	memStart := runtime.MemStats{}
-	runtime.ReadMemStats(&memStart)
-	return memStart.Alloc
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	return memStats.Alloc
 }

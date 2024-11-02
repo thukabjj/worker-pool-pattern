@@ -1,0 +1,20 @@
+
+.HELP.md
+
+ ### Java ###
+.build
+*.build_*
+WorkerPoolPattern
+*.jar
+
+ ### IntelliJ IDEA ###
+ *.idea/*
+ *.iws
+ .iml
+ *.ipr
+*build/
+*META-INF/
+*.class
+*.iml
+
+main
